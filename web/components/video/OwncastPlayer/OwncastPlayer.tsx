@@ -1,30 +1,26 @@
-/* eslint-disable max-classes-per-file */
-import React, { FC, useContext, useEffect } from 'react';
-import { useAtom, useAtomValue } from 'jotai';
-import { useHotkeys } from 'react-hotkeys-hook';
-import { useTranslation } from 'next-export-i18n';
+import { FC, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useAtomValue } from 'jotai';
 import classNames from 'classnames';
 import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
-import { VideoJS } from '../VideoJS/VideoJS';
-import ViewerPing from '../viewer-ping';
+import { useSelectedLanguage } from 'next-export-i18n';
+import { Container, I18nProvider } from '@videojs/react';
+import { HlsJsVideo } from '@videojs/react/media/hlsjs-video';
+import type { HlsJsAdapter, HlsSource } from '@videojs/hlsjs-video';
+import { Player } from '../player/createOwncastPlayer';
+import { playerI18nOverrides, usePlayerLabels } from '../player/usePlayerLabels';
+import { buildHlsConfig, LatencyProfile } from '../player/hlsConfig';
+import { useAutoplay } from '../player/useAutoplay';
+import { readSavedVolume } from '../player/volumePersistence';
+import { readLatencyPreference, writeLatencyPreference } from '../player/latencyPreference';
+import { OwncastSkin } from '../OwncastSkin/OwncastSkin';
+import { PlayerWiring } from './PlayerWiring';
 import { VideoPoster } from '../VideoPoster/VideoPoster';
-import { getLocalStorage, setLocalStorage } from '../../../utils/localStorage';
-import { AutoplaySetting, autoplayModeForSetting } from '../../../utils/autoplay';
-import { Localization } from '../../../types/localization';
-import { isVideoPlayingAtom, clockSkewAtom } from '../../stores/ClientConfigStore';
 import PlaybackMetrics from '../metrics/playback';
-import { createVideoSettingsMenuButton, LATENCY_COMPENSATION_ENABLED } from '../settings-menu';
-import LatencyCompensator from '../latencyCompensator';
-import styles from './OwncastPlayer.module.scss';
+import { AutoplaySetting, autoplayModeForSetting } from '../../../utils/autoplay';
+import { clockSkewAtom, isVideoPlayingAtom } from '../../stores/ClientConfigStore';
 import { VideoSettingsServiceContext } from '../../../services/video-settings-service';
 import { ComponentError } from '../../ui/ComponentError/ComponentError';
-
-const PLAYER_VOLUME = 'owncast_volume';
-
-const ping = new ViewerPing();
-let playbackMetrics = null;
-let latencyCompensator = null;
-let latencyCompensatorEnabled = false;
+import styles from './OwncastPlayer.module.scss';
 
 export type OwncastPlayerProps = {
   source: string;
@@ -35,6 +31,8 @@ export type OwncastPlayerProps = {
   className?: string;
 };
 
+const HLS_TYPE = 'application/vnd.apple.mpegurl';
+
 export const OwncastPlayer: FC<OwncastPlayerProps> = ({
   source,
   online,
@@ -44,357 +42,139 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
   className,
 }) => {
   const VideoSettingsService = useContext(VideoSettingsServiceContext);
-  const playerRef = React.useRef(null);
-  const [videoPlaying, setVideoPlaying] = useAtom(isVideoPlayingAtom);
+  const videoPlaying = useAtomValue(isVideoPlayingAtom);
   const clockSkew = useAtomValue(clockSkewAtom);
-  const { t } = useTranslation();
+  const labels = usePlayerLabels();
+  // The player's built-in strings and lang/dir follow Owncast's language.
+  const { lang } = useSelectedLanguage();
 
-  // A persisted volume of 0 is a mute the viewer chose on a previous visit
-  // (handleVolume stores muted as 0). Restoring it is a manual mute, not an
-  // autoplay one, so the big unmute overlay stays away. Read once at render;
-  // guarded because this runs during render (no window during SSR).
-  const savedVolume = typeof window !== 'undefined' ? getLocalStorage(PLAYER_VOLUME) : null;
-  const startedMutedByViewer = savedVolume !== null && Number(savedVolume) === 0;
+  const [video, setVideo] = useState<HTMLVideoElement | null>(null);
+  const [adapter, setAdapter] = useState<HlsJsAdapter | null>(null);
+  const [engineName, setEngineName] = useState<string | undefined>(undefined);
+  const [lowLatency, setLowLatency] = useState<boolean>(() => readLatencyPreference());
+  const [qualityNames, setQualityNames] = useState<Map<number, string>>(new Map());
 
-  const setSavedVolume = () => {
-    try {
-      playerRef.current.volume(getLocalStorage(PLAYER_VOLUME) || 1);
-    } catch (err) {
-      console.warn(err);
-    }
-  };
+  // One metrics session per mount; stop() on unmount sends the final report.
+  // Created in an effect rather than during render so React strict mode's
+  // simulated remount gets a fresh, running instance instead of the stopped
+  // one. The player waits for it, so the hls.js config is only ever built
+  // with the final instance and the engine is not rebuilt at startup.
+  const [metrics, setMetrics] = useState<PlaybackMetrics | null>(null);
+  useEffect(() => {
+    const instance = new PlaybackMetrics();
+    setMetrics(instance);
+    return () => {
+      instance.stop();
+    };
+  }, []);
 
-  const handleVolume = () => {
-    setLocalStorage(PLAYER_VOLUME, playerRef.current.muted() ? 0 : playerRef.current.volume());
-  };
-
-  const togglePlayback = () => {
-    if (playerRef.current.paused()) {
-      playerRef.current.play();
-    } else {
-      playerRef.current.pause();
-    }
-  };
-
-  const toggleMute = () => {
-    if (playerRef.current.muted() || playerRef.current.volume() === 0) {
-      playerRef.current.volume(0.7);
-    } else {
-      playerRef.current.volume(0);
-    }
-  };
-
-  const toggleFullScreen = () => {
-    if (playerRef.current.isFullscreen()) {
-      playerRef.current.exitFullscreen();
-    } else {
-      playerRef.current.requestFullscreen();
-    }
-  };
-
-  const startLatencyCompensator = () => {
-    if (latencyCompensator) {
-      // Fully tear down the old instance so its check timer doesn't leak.
-      latencyCompensator.disable();
-    }
-
-    latencyCompensatorEnabled = true;
-
-    latencyCompensator = new LatencyCompensator(playerRef.current);
-    latencyCompensator.setClockSkew(clockSkew);
-    latencyCompensator.enable();
-    setLocalStorage(LATENCY_COMPENSATION_ENABLED, true);
-  };
-
-  const stopLatencyCompensator = () => {
-    if (latencyCompensator) {
-      latencyCompensator.disable();
-    }
-    latencyCompensator = null;
-    latencyCompensatorEnabled = false;
-    setLocalStorage(LATENCY_COMPENSATION_ENABLED, false);
-  };
-
-  // Toggle minimized latency mode. Return the new state.
-  const toggleLatencyCompensator = () => {
-    if (latencyCompensatorEnabled) {
-      stopLatencyCompensator();
-    } else {
-      startLatencyCompensator();
-    }
-    return latencyCompensatorEnabled;
-  };
-
-  const setupLatencyCompensator = player => {
-    const tech = player.tech({ IWillNotUseThisInPlugins: true });
-
-    // VHS is required.
-    if (!tech || !tech.vhs) {
-      return;
-    }
-
-    const latencyCompensatorEnabledSaved = getLocalStorage(LATENCY_COMPENSATION_ENABLED);
-
-    if (latencyCompensatorEnabledSaved === 'true' && tech && tech.vhs) {
-      startLatencyCompensator();
-    } else {
-      stopLatencyCompensator();
-    }
-  };
-
-  const createSettings = async (player, videojs) => {
-    const videoQualities = await VideoSettingsService.getVideoQualities();
-    const menuButton = createVideoSettingsMenuButton(
-      player,
-      videojs,
-      videoQualities,
-      toggleLatencyCompensator,
-    );
-    player.controlBar.addChild(
-      menuButton,
-      {},
-      // eslint-disable-next-line no-underscore-dangle
-      player.controlBar.children_.length - 2,
-    );
-    setupLatencyCompensator(player);
-  };
-
-  const setupAirplay = (player, videojs) => {
-    // eslint-disable-next-line no-prototype-builtins
-    if (window.hasOwnProperty('WebKitPlaybackTargetAvailabilityEvent')) {
-      const VJSButtonClass = videojs.getComponent('Button');
-
-      class ConcreteButtonClass extends VJSButtonClass {
-        constructor() {
-          super(player);
+  // Admin-configured names for the quality menu.
+  useEffect(() => {
+    let cancelled = false;
+    VideoSettingsService.getVideoQualities()
+      .then(qualities => {
+        if (!cancelled) {
+          setQualityNames(new Map(qualities.map(quality => [quality.index, quality.name])));
         }
+      })
+      .catch(() => {
+        // The service logs its own errors.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [VideoSettingsService]);
 
-        // eslint-disable-next-line class-methods-use-this
-        handleClick() {
-          try {
-            const videoElement = document.getElementsByTagName('video')[0];
-            (videoElement as any).webkitShowPlaybackTargetPicker();
-          } catch (e) {
-            console.error(e);
-          }
-        }
-      }
+  // A persisted volume of 0 is a mute the viewer chose on a previous visit.
+  // Restoring it is a manual mute, not an autoplay one, so the big unmute
+  // overlay stays away. Read once at mount: the wiring persists the volume
+  // as it changes, and autoplay inputs must stay stable for the session.
+  const [startedMutedByViewer] = useState<boolean>(() => readSavedVolume() === 0);
+  const startsInaudible = initiallyMuted || startedMutedByViewer;
 
-      const ccbc = new ConcreteButtonClass();
-      const concreteButtonInstance = player.controlBar.addChild(ccbc);
-      concreteButtonInstance.addClass('vjs-airplay');
+  const autoplayMode = useMemo(() => {
+    const prefersReducedMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const navConnection =
+      typeof navigator !== 'undefined'
+        ? (navigator as Navigator & { connection?: { saveData?: boolean } }).connection
+        : undefined;
+    return autoplayModeForSetting(autoplay, {
+      prefersReducedMotion,
+      saveData: navConnection?.saveData === true,
+      startsInaudible,
+    });
+  }, [autoplay, startsInaudible]);
+
+  // Only the viewer's own earlier mute suppresses the unmute overlay. An
+  // embed's initiallyMuted is the embedder's choice, so the viewer still
+  // gets the big unmute affordance, as with the Video.js 8 player.
+  const mutedByAutoplay = useAutoplay(adapter, autoplayMode, startedMutedByViewer);
+
+  const latencyProfile: LatencyProfile = lowLatency ? 'low' : 'default';
+  // Changing engine config rebuilds the hls.js engine, which is exactly how
+  // the latency toggle takes effect. The metrics instance is stable once
+  // created, so the config only changes with the profile.
+  const hlsSource = useMemo<HlsSource>(
+    () => ({
+      src: source,
+      type: HLS_TYPE,
+      engine: {
+        hlsJs: buildHlsConfig({ latencyProfile, decorator: metrics }),
+      },
+    }),
+    [source, latencyProfile, metrics],
+  );
+
+  // The engine rebuild swaps in a new MediaSource, which leaves the element
+  // paused. Resume after the rebuild when the viewer was watching, so the
+  // toggle does not stop playback. useAutoplay deliberately ignores later
+  // loadstarts, so this is the only place that restarts it.
+  // If that resume is rejected, bumping resumeFailedSignal tells
+  // PlayerWiring, which owns the viewer pings and the playing atom, to stop
+  // them.
+  const resumeAfterRebuild = useRef(false);
+  const [resumeFailedSignal, setResumeFailedSignal] = useState(0);
+  useEffect(() => {
+    if (!adapter) {
+      return undefined;
     }
-  };
-
-  const setupUnmuteButton = (player, videojs) => {
-    const VJSButtonClass = videojs.getComponent('Button');
-
-    class UnmuteButton extends VJSButtonClass {
-      constructor() {
-        super(player);
-      }
-
-      // eslint-disable-next-line class-methods-use-this
-      handleClick() {
-        player.muted(false);
-        if (player.volume() === 0) {
-          const saved = parseFloat(getLocalStorage(PLAYER_VOLUME));
-          player.volume(saved > 0 ? saved : 0.7);
-        }
-      }
-    }
-
-    const unmuteButton = new UnmuteButton();
-    unmuteButton.addClass('vjs-big-unmute-button');
-    // Localize the control text (exposed to assistive tech and tooltips),
-    // falling back to English when the key has no translation, mirroring the
-    // Translation component's missing-key behavior.
-    const unmuteLabel = t(Localization.Frontend.unmute);
-    unmuteButton.controlText(unmuteLabel === Localization.Frontend.unmute ? 'Unmute' : unmuteLabel);
-    // The overlay glyph is antd's MutedFilled speaker (the icon family used by
-    // the rest of the UI) instead of the video.js icon font. Inlined as SVG
-    // because this button renders into video.js DOM, outside React. Path from
-    // @ant-design/icons-svg MutedFilled. fill=currentColor picks up the theme
-    // action color set in VideoJS.scss.
-    const iconPlaceholder = unmuteButton.el().querySelector('.vjs-icon-placeholder');
-    if (iconPlaceholder) {
-      iconPlaceholder.innerHTML =
-        '<svg viewBox="64 64 896 896" fill="currentColor" fill-rule="evenodd" aria-hidden="true" focusable="false"><path d="M771.91 115a31.65 31.65 0 00-17.42 5.27L400 351.97H236a16 16 0 00-16 16v288.06a16 16 0 0016 16h164l354.5 231.7a31.66 31.66 0 0017.42 5.27c16.65 0 32.08-13.25 32.08-32.06V147.06c0-18.8-15.44-32.06-32.09-32.06"></path></svg>';
-    }
-    player.addChild(unmuteButton);
-
-    // Show the big unmute affordance only while playback is inaudible *because
-    // the player muted it* (video.js's 'any' autoplay fallback, or an embed
-    // that asked to start muted). A viewer who muted deliberately, whether via
-    // the control bar, the "m" key, or a persisted mute restored from a
-    // previous visit (startedMutedByViewer), keeps a clean player: no giant
-    // overlay. The flag is cleared the moment the player becomes audible, so
-    // any later mute is by definition manual and never re-shows the button.
-    const inaudible = () => player.muted() || player.volume() === 0;
-    // Autoplay can win the race against this ready handler (the source is set
-    // at player construction), so seed the flag from current state: already
-    // playing inaudibly at ready means the player did it, since no user
-    // gesture can have happened yet.
-    let mutedByAutoplay = !startedMutedByViewer && !player.paused() && inaudible();
-
-    const updateUnmuteButton = () => {
-      if (!inaudible()) {
-        mutedByAutoplay = false;
-      }
-      if (mutedByAutoplay && !player.paused() && inaudible()) {
-        unmuteButton.show();
-      } else {
-        unmuteButton.hide();
+    const resume = () => {
+      if (resumeAfterRebuild.current) {
+        resumeAfterRebuild.current = false;
+        adapter.play().catch(error => {
+          console.error(error);
+          setResumeFailedSignal(count => count + 1);
+        });
       }
     };
+    adapter.addEventListener('loadstart', resume);
+    return () => adapter.removeEventListener('loadstart', resume);
+  }, [adapter]);
 
-    player.on('autoplay-success', () => {
-      mutedByAutoplay = !startedMutedByViewer && inaudible();
-      updateUnmuteButton();
-    });
-
-    player.on(['playing', 'pause', 'ended', 'volumechange'], updateUnmuteButton);
-    updateUnmuteButton();
-  };
-
-  // Register keyboard shortcut for the space bar to toggle playback
-  useHotkeys('space', e => {
-    e.preventDefault();
-    togglePlayback();
-  });
-
-  // Register keyboard shortcut for f to toggle full screen
-  useHotkeys('f', toggleFullScreen, {
-    enableOnContentEditable: false,
-  });
-
-  // Register keyboard shortcut for the "m" key to toggle mute
-  useHotkeys('m', toggleMute, {
-    enableOnContentEditable: false,
-  });
-
-  useHotkeys('0', () => playerRef.current.volume(playerRef.current.volume() + 0.1), {
-    enableOnContentEditable: false,
-  });
-  useHotkeys('9', () => playerRef.current.volume(playerRef.current.volume() - 0.1), {
-    enableOnContentEditable: false,
-  });
-
-  // Resolve the video.js autoplay value from the instance setting, honoring the
-  // viewer's data-saver and reduced-motion preferences. Guarded because this
-  // runs during render (no window during SSR).
-  const prefersReducedMotion =
-    typeof window !== 'undefined' &&
-    typeof window.matchMedia === 'function' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const navConnection =
-    typeof navigator !== 'undefined'
-      ? (navigator as Navigator & { connection?: { saveData?: boolean } }).connection
-      : undefined;
-  // The player restores the persisted volume on ready, and a mute is persisted
-  // as volume 0. Starting muted (embed request) or at volume 0 makes a
-  // sound-only autoplay attempt succeed silently in Firefox, which allows
-  // inaudible autoplay, so the mapping needs to know about it.
-  const startsInaudible = initiallyMuted || startedMutedByViewer;
-  const autoplayMode = autoplayModeForSetting(autoplay, {
-    prefersReducedMotion,
-    saveData: navConnection?.saveData === true,
-    startsInaudible,
-  });
-
-  const videoJsOptions = {
-    autoplay: autoplayMode,
-    controls: true,
-    responsive: true,
-    fluid: false,
-    fill: true,
-    playsinline: true,
-    liveui: true,
-    preload: 'auto',
-    muted: initiallyMuted,
-    controlBar: {
-      progressControl: {
-        seekBar: false,
-      },
+  const handleLowLatencyChange = useCallback(
+    (enabled: boolean) => {
+      resumeAfterRebuild.current = adapter !== null && !adapter.paused;
+      writeLatencyPreference(enabled);
+      setLowLatency(enabled);
     },
-    html5: {
-      vhs: {
-        // used to select the lowest bitrate playlist initially. This helps to decrease playback start time. This setting is false by default.
-        enableLowInitialPlaylist: true,
-        experimentalBufferBasedABR: true,
-        useNetworkInformationApi: true,
-        maxPlaylistRetries: 30,
-      },
-    },
-    liveTracker: {
-      trackingThreshold: 0,
-      liveTolerance: 15,
-    },
-    sources: [
-      {
-        src: source,
-        type: 'application/x-mpegURL',
-      },
-    ],
-  };
-
-  const handlePlayerReady = (player, videojs) => {
-    playerRef.current = player;
-    setSavedVolume();
-    setupAirplay(player, videojs);
-    setupUnmuteButton(player, videojs);
-
-    // You can handle player events here, for example:
-    player.on('waiting', () => {
-      console.debug('player is waiting');
-    });
-
-    player.on('dispose', () => {
-      console.debug('player will dispose');
-      ping.stop();
-    });
-
-    player.on('playing', () => {
-      console.debug('player is playing');
-      ping.start();
-      setVideoPlaying(true);
-    });
-
-    player.on('pause', () => {
-      console.debug('player is paused');
-      ping.stop();
-      setVideoPlaying(false);
-    });
-
-    player.on('ended', () => {
-      console.debug('player is ended');
-      ping.stop();
-      setVideoPlaying(false);
-    });
-
-    videojs.hookOnce();
-
-    player.on('volumechange', handleVolume);
-
-    playbackMetrics = new PlaybackMetrics(player, videojs);
-    playbackMetrics.setClockSkew(clockSkew);
-
-    createSettings(player, videojs);
-  };
-
-  useEffect(() => {
-    if (playbackMetrics) {
-      playbackMetrics.setClockSkew(clockSkew);
-    }
-  }, [clockSkew]);
-
-  useEffect(
-    () => () => {
-      stopLatencyCompensator();
-      playbackMetrics?.stop();
-    },
-    [],
+    [adapter],
   );
+
+  const handleUnmute = useCallback(() => {
+    if (!adapter) {
+      return;
+    }
+    adapter.muted = false;
+    if (adapter.volume === 0) {
+      const saved = readSavedVolume();
+      adapter.volume = saved !== null && saved > 0 ? saved : 0.7;
+    }
+  }, [adapter]);
+
+  const i18n = useMemo(() => playerI18nOverrides(labels), [labels]);
 
   return (
     <ErrorBoundary
@@ -408,10 +188,42 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
       )}
     >
       <div className={classNames(styles.container, className)} id="player">
-        {online && (
-          <div className={styles.player}>
-            <VideoJS options={videoJsOptions} onReady={handlePlayerReady} aria-label={title} />
-          </div>
+        {online && metrics && (
+          <I18nProvider locale={lang || 'en'} translations={i18n}>
+            <Player title={title}>
+              <Container className={styles.player} aria-label={title}>
+                <HlsJsVideo
+                  ref={setVideo}
+                  mediaRef={setAdapter}
+                  className={styles.video}
+                  source={hlsSource}
+                  streamType="live"
+                  preload="auto"
+                  playsInline
+                  muted={initiallyMuted}
+                  fallback={null}
+                />
+                <OwncastSkin
+                  labels={labels}
+                  mutedByAutoplay={mutedByAutoplay}
+                  onUnmute={handleUnmute}
+                  lowLatency={lowLatency}
+                  onLowLatencyChange={handleLowLatencyChange}
+                  showLatencyToggle={engineName === 'hlsjs'}
+                  qualityNames={qualityNames}
+                />
+                <PlayerWiring
+                  video={video}
+                  adapter={adapter}
+                  metrics={metrics}
+                  clockSkew={Number(clockSkew)}
+                  onEngineChange={setEngineName}
+                  startedMutedByViewer={startedMutedByViewer}
+                  resumeFailedSignal={resumeFailedSignal}
+                />
+              </Container>
+            </Player>
+          </I18nProvider>
         )}
         <div className={styles.poster}>
           {!videoPlaying && (

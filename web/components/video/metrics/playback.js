@@ -3,27 +3,6 @@ const EVENT_REPORT_INTERVAL = 10000;
 const MAX_VALID_LATENCY_SECONDS = 100; // Anything > this gets thrown out.
 const CMCD_VERSION = 2;
 
-function getCurrentlyPlayingSegment(tech) {
-  const targetMedia = tech.vhs.playlists.media();
-  const snapshotTime = tech.currentTime();
-  let segment;
-
-  // Iterate through available segments and get first within which snapshot_time is
-  for (let i = 0, l = targetMedia.segments.length; i < l; i += 1) {
-    // Note: segment.end may be undefined or is not properly set
-    if (snapshotTime < targetMedia.segments[i].end) {
-      segment = targetMedia.segments[i];
-      break;
-    }
-  }
-  // No match means currentTime is outside the tracked window (mid-seek, or
-  // segment bookkeeping is stale after a live-edge resync). Report no segment
-  // and skip the sample: falling back to the oldest segment inflates the
-  // reported latency by up to the whole playlist window.
-
-  return segment;
-}
-
 function generateSessionID() {
   if (crypto.randomUUID) {
     return crypto.randomUUID();
@@ -72,20 +51,30 @@ function appendCmcdQuery(uri, keys) {
   return `${uri}${separator}CMCD=${encodeURIComponent(payload)}`;
 }
 
+// hls.js event name for Hls.Events.FRAG_LOADED. Spelled out so this module
+// stays free of the ESM-only @videojs packages and remains unit-testable.
+const HLS_FRAG_LOADED_EVENT = 'hlsFragLoaded';
+
 /*
 CMCD v2 (CTA-5004-A) metrics emitter.
 
 Request mode: every playlist and segment request the player makes is
 decorated with a CMCD query parameter carrying throughput, buffer, bitrate
 and live latency data, which the server harvests off the requests it is
-already serving.
+already serving. The hls.js xhrSetup hook (see player/hlsConfig.ts) calls
+decorateUrl for each request.
 
 Event mode: player state transitions, errors and a periodic time-interval
 report are POSTed to the CMCD collector endpoint.
+
+Lifecycle: construct once per player mount, attachMedia(videoElement) when
+the element exists, setEngine(hls) every time the hls.js engine is created
+(it is rebuilt when the latency profile changes), stop() on unmount.
 */
 class PlaybackMetrics {
-  constructor(player, videojs) {
-    this.player = player;
+  constructor() {
+    this.media = null;
+    this.hls = null;
     this.clockSkewMs = 0;
     this.sessionID = generateSessionID();
     this.sequenceNumber = 0;
@@ -104,61 +93,24 @@ class PlaybackMetrics {
     this.handleError = this.handleError.bind(this);
     this.handleBuffering = this.handleBuffering.bind(this);
     this.handleNoLongerBuffering = this.handleNoLongerBuffering.bind(this);
+    this.handleFragLoaded = this.handleFragLoaded.bind(this);
 
-    this.player.on('play', this.handlePlay);
-    this.player.on('playing', this.handlePlaying);
-    this.player.on('pause', this.handlePause);
-    this.player.on('ended', this.handleEnded);
-    this.player.on('error', this.handleError);
-    this.player.on('stalled', this.handleBuffering);
-    this.player.on('waiting', this.handleBuffering);
-    this.player.on('canplaythrough', this.handleNoLongerBuffering);
-
-    // Decorate every media request with CMCD request-mode data and time
-    // segment downloads for ttlb reporting. Keep a reference of the
-    // standard vjs xhr function and wrap it.
-    const oldVjsXhrCallback = videojs.xhr;
-    // eslint-disable-next-line no-param-reassign
-    videojs.Vhs.xhr = (...args) => {
-      try {
-        const request = args[0];
-        const isSegment = /\.ts(\?|$)/.test(request.uri);
-        const isPlaylist = /\.m3u8(\?|$)/.test(request.uri);
-        if (isSegment || isPlaylist) {
-          // eslint-disable-next-line no-param-reassign
-          request.uri = appendCmcdQuery(request.uri, {
-            ...this.commonCmcdKeys(),
-            ot: isSegment ? 'av' : 'm',
-            sf: 'h',
-            st: 'l',
-            su: !this.hasStartedPlaying || undefined,
-          });
-        }
-
-        // Time segment downloads client-side: reported as ttlb, the only
-        // download duration measurement that stays honest when a proxy or
-        // tunnel sits between the viewer and the server.
-        if (isSegment && typeof args[1] === 'function') {
-          const start = Date.now();
-          const cb = args[1];
-          // eslint-disable-next-line no-param-reassign
-          args[1] = (request_, error, response) => {
-            this.segmentDownloadTimesMs.push(Date.now() - start);
-            cb(request_, error, response);
-          };
-        }
-      } catch {
-        // Never let metrics decoration break media loading.
-      }
-
-      return oldVjsXhrCallback(...args);
-    };
+    this.mediaListeners = [
+      ['play', this.handlePlay],
+      ['playing', this.handlePlaying],
+      ['pause', this.handlePause],
+      ['ended', this.handleEnded],
+      ['error', this.handleError],
+      ['stalled', this.handleBuffering],
+      ['waiting', this.handleBuffering],
+      ['canplaythrough', this.handleNoLongerBuffering],
+    ];
 
     this.eventReportTimer = setInterval(() => {
-      if (!this.player || !this.hasStartedPlaying) {
+      if (!this.media || !this.hasStartedPlaying) {
         return;
       }
-      if (this.player.paused()) {
+      if (this.media.paused) {
         // Viewer pings keep a paused tab active. Refresh its CMCD state too,
         // or the server prunes its health before the viewer.
         this.sendEventReport('t', { sta: 'a' });
@@ -168,20 +120,79 @@ class PlaybackMetrics {
     }, EVENT_REPORT_INTERVAL);
   }
 
+  attachMedia(media) {
+    if (this.media === media) {
+      return;
+    }
+    this.detachMedia();
+    this.media = media;
+    if (media) {
+      this.mediaListeners.forEach(([event, handler]) => media.addEventListener(event, handler));
+    }
+  }
+
+  detachMedia() {
+    if (!this.media) {
+      return;
+    }
+    this.mediaListeners.forEach(([event, handler]) =>
+      this.media.removeEventListener(event, handler),
+    );
+    this.media = null;
+  }
+
+  // Bind to the hls.js instance for throughput, bitrate, latency and
+  // per-fragment download timing. Pass null when the engine is destroyed.
+  setEngine(hls) {
+    if (this.hls === hls) {
+      return;
+    }
+    if (this.hls) {
+      this.hls.off(HLS_FRAG_LOADED_EVENT, this.handleFragLoaded);
+    }
+    this.hls = hls;
+    if (hls) {
+      hls.on(HLS_FRAG_LOADED_EVENT, this.handleFragLoaded);
+    }
+  }
+
   stop() {
     clearInterval(this.eventReportTimer);
-    // Component teardown does not reliably emit Video.js's ended event.
-    // Preserve the terminal state while its viewer is still active.
-    if (this.hasStartedPlaying && !this.player.ended()) {
+    // Component teardown does not reliably emit an ended event. Preserve the
+    // terminal state while its viewer is still active.
+    if (this.hasStartedPlaying && this.media && !this.media.ended) {
       this.sendEventReport('ps', { sta: 'e' });
     }
-    this.player.off();
+    this.detachMedia();
+    this.setEngine(null);
   }
 
   // Keep our client clock in sync with the server clock to determine
   // accurate latency calculations.
   setClockSkew(skewMs) {
     this.clockSkewMs = skewMs;
+  }
+
+  // RequestDecorator implementation used by the hls.js xhrSetup hook.
+  decorateUrl(url, kind) {
+    return appendCmcdQuery(url, {
+      ...this.commonCmcdKeys(),
+      ot: kind === 'segment' ? 'av' : 'm',
+      sf: 'h',
+      st: 'l',
+      su: !this.hasStartedPlaying || undefined,
+    });
+  }
+
+  // Time segment downloads client-side: reported as ttlb, the only
+  // download duration measurement that stays honest when a proxy or
+  // tunnel sits between the viewer and the server.
+  handleFragLoaded(_event, data) {
+    const loading = data?.frag?.stats?.loading;
+    if (!loading || !(loading.end > loading.start)) {
+      return;
+    }
+    this.segmentDownloadTimesMs.push(Math.round(loading.end - loading.start));
   }
 
   handlePlay() {
@@ -204,7 +215,7 @@ class PlaybackMetrics {
 
   handlePause() {
     // Tearing down the player fires a pause; don't report it.
-    if (!this.player.ended()) {
+    if (this.media && !this.media.ended) {
       this.sendEventReport('ps', { sta: 'a' });
     }
   }
@@ -214,17 +225,16 @@ class PlaybackMetrics {
   }
 
   handleError() {
-    const error = this.player.error();
+    const error = this.media?.error;
     this.sendEventReport('e', { ec: error ? String(error.code) : undefined });
   }
 
   handleBuffering() {
     // Buffering before the first frame is startup, not an interruption. A
-    // waiting event that fires while the player is seeking is the fetch at
-    // a seek discontinuity (the viewer scrubbed, or the latency compensator
-    // jumped forward), not a playback interruption. Genuine starvation fires
-    // with seeking() false, so only report those.
-    if (!this.hasStartedPlaying || this.player.seeking() || this.isStalled) {
+    // waiting event that fires while seeking is the fetch at a seek
+    // discontinuity, not a playback interruption. Genuine starvation fires
+    // with seeking false, so only report those.
+    if (!this.hasStartedPlaying || this.media?.seeking || this.isStalled) {
       return;
     }
     this.isStalled = true;
@@ -242,29 +252,35 @@ class PlaybackMetrics {
       sid: this.sessionID,
     };
 
-    const throughput = this.measuredThroughputKbps();
-    if (throughput) {
-      keys.mtp = throughput;
-    }
+    // hls.js getters can throw on a destroyed instance; keep whatever was
+    // collected so far.
+    try {
+      const throughput = this.measuredThroughputKbps();
+      if (throughput) {
+        keys.mtp = throughput;
+      }
 
-    const bitrate = this.currentBitrateKbps();
-    if (bitrate) {
-      keys.br = bitrate;
-    }
+      const bitrate = this.currentBitrateKbps();
+      if (bitrate) {
+        keys.br = bitrate;
+      }
 
-    const buffer = this.bufferLengthMs();
-    if (buffer !== null) {
-      keys.bl = buffer;
-    }
+      const buffer = this.bufferLengthMs();
+      if (buffer !== null) {
+        keys.bl = buffer;
+      }
 
-    const latency = this.liveLatencyMs();
-    if (latency !== null) {
-      keys.ltc = latency;
-    }
+      const latency = this.liveLatencyMs();
+      if (latency !== null) {
+        keys.ltc = latency;
+      }
 
-    const playbackRate = this.player.playbackRate();
-    if (playbackRate !== 1) {
-      keys.pr = playbackRate;
+      const playbackRate = this.media?.playbackRate ?? 1;
+      if (playbackRate !== 1) {
+        keys.pr = playbackRate;
+      }
+    } catch {
+      // Ignore; base keys are still reported.
     }
 
     return keys;
@@ -323,13 +339,13 @@ class PlaybackMetrics {
   }
 
   playerStateToken() {
-    if (this.player.seeking()) {
+    if (this.media?.seeking) {
       return 'k';
     }
-    if (this.player.ended()) {
+    if (this.media?.ended) {
       return 'e';
     }
-    if (this.player.paused()) {
+    if (this.media?.paused) {
       return 'a';
     }
     if (this.isStalled) {
@@ -338,32 +354,32 @@ class PlaybackMetrics {
     return 'p';
   }
 
+  // hls.js bandwidth estimate in bits per second, reported as kbps rounded
+  // to the nearest 100 as the CMCD spec asks.
   measuredThroughputKbps() {
-    const tech = this.player.tech({ IWillNotUseThisInPlugins: true });
-    const bandwidth = tech?.vhs?.systemBandwidth;
-    if (!bandwidth) {
+    const bandwidth = this.hls?.bandwidthEstimate;
+    if (!bandwidth || !Number.isFinite(bandwidth)) {
       return null;
     }
-    // The spec asks for throughput rounded to the nearest 100kbps.
     return Math.round(bandwidth / 1000 / 100) * 100;
   }
 
   currentBitrateKbps() {
-    const tech = this.player.tech({ IWillNotUseThisInPlugins: true });
-    const bandwidth = tech?.vhs?.playlists?.media()?.attributes?.BANDWIDTH;
-    if (!bandwidth) {
+    const level = this.hls?.levels?.[this.hls.currentLevel];
+    const bitrate = level?.bitrate;
+    if (!bitrate) {
       return null;
     }
-    return Math.round(bandwidth / 1000);
+    return Math.round(bitrate / 1000);
   }
 
   bufferLengthMs() {
     try {
-      const buffered = this.player.buffered();
+      const buffered = this.media?.buffered;
       if (!buffered || buffered.length === 0) {
         return null;
       }
-      const bufferMs = (buffered.end(buffered.length - 1) - this.player.currentTime()) * 1000;
+      const bufferMs = (buffered.end(buffered.length - 1) - this.media.currentTime) * 1000;
       if (bufferMs < 0) {
         return null;
       }
@@ -374,27 +390,21 @@ class PlaybackMetrics {
     }
   }
 
+  // Wall-clock latency: program-date-time of the playing position (hls.js
+  // playingDate) against the server clock.
   liveLatencyMs() {
-    const tech = this.player.tech({ IWillNotUseThisInPlugins: true });
-    if (!tech?.vhs) {
-      return null;
-    }
-
     try {
-      const segment = getCurrentlyPlayingSegment(tech);
-      if (!segment || !segment.dateTimeObject) {
+      const playingDate = this.hls?.playingDate;
+      if (!playingDate) {
         return null;
       }
-
-      const segmentTime = segment.dateTimeObject.getTime();
       const now = Date.now() + this.clockSkewMs;
-      const latency = now - segmentTime;
+      const latency = now - playingDate.getTime();
 
       // Throw away values that seem invalid.
       if (latency < 0 || latency / 1000 >= MAX_VALID_LATENCY_SECONDS) {
         return null;
       }
-
       return Math.round(latency);
     } catch {
       return null;
@@ -402,12 +412,11 @@ class PlaybackMetrics {
   }
 
   droppedFrameCount() {
-    const tech = this.player.tech({ IWillNotUseThisInPlugins: true });
-    const el = tech?.el?.();
-    if (!el?.getVideoPlaybackQuality) {
+    const media = this.media;
+    if (!media?.getVideoPlaybackQuality) {
       return null;
     }
-    return el.getVideoPlaybackQuality().droppedVideoFrames || null;
+    return media.getVideoPlaybackQuality().droppedVideoFrames || null;
   }
 }
 

@@ -7,13 +7,13 @@ export enum AutoplaySetting {
 
 const AUTOPLAY_VALUES = Object.values(AutoplaySetting);
 
-// Video.js autoplay option values:
+// Autoplay modes:
 //   false  -> no autoplay
 //   'any'  -> try to play with sound, fall back to muted if the browser blocks it
 //   'play' -> play with sound when the browser allows it, otherwise stay paused
-type VideoJSAutoplayMode = false | 'any' | 'play';
+export type AutoplayMode = false | 'any' | 'play';
 
-// Map an autoplay setting to the video.js autoplay value. A viewer who has
+// Map an autoplay setting to the player's autoplay mode. A viewer who has
 // signaled they would rather not autoplay (data-saver on, or reduced-motion
 // preferred) gets no autoplay regardless of the configured setting.
 export function autoplayModeForSetting(
@@ -23,7 +23,7 @@ export function autoplayModeForSetting(
     saveData?: boolean;
     startsInaudible?: boolean;
   } = {},
-): VideoJSAutoplayMode {
+): AutoplayMode {
   if (preferences.prefersReducedMotion || preferences.saveData) {
     return false;
   }

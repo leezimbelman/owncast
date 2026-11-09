@@ -7,6 +7,6 @@ describe(`Online video embed`, () => {
 	});
 
 	it('Should have a play button', () => {
-		cy.get('.vjs-big-play-button').should('be.visible');
+		cy.get('.owncast-big-play-button').should('be.visible');
 	});
 });

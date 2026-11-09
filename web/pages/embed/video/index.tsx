@@ -95,8 +95,8 @@ export default function VideoEmbed() {
   );
 
   const getView = () => {
-    // Wait for the config too: the player's video.js options (autoplay among
-    // them) are init-only, so it must not mount with default config values.
+    // Wait for the config too: the player's autoplay mode is decided at mount,
+    // so it must not mount with default config values.
     if (appState.appLoading || !configLoaded) {
       return loadingState;
     }

@@ -20,7 +20,14 @@ const meta = {
       },
     },
   },
-  parameters: {},
+  parameters: {
+    docs: {
+      description: {
+        component:
+          'The Owncast live player: Video.js 10 with the hls.js engine and the Owncast skin. Pick a stream from the controls to test real playback.',
+      },
+    },
+  },
 } satisfies Meta<typeof OwncastPlayer>;
 
 export default meta;

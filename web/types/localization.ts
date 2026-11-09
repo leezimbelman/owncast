@@ -27,6 +27,33 @@ export const Localization = {
     follow: 'Follow',
     connected: 'Connected',
     unmute: 'Frontend.unmute',
+    // Video player controls
+    Player: {
+      play: 'Frontend.Player.play',
+      pause: 'Frontend.Player.pause',
+      mute: 'Frontend.Player.mute',
+      fullscreen: 'Frontend.Player.fullscreen',
+      exitFullscreen: 'Frontend.Player.exitFullscreen',
+      pictureInPicture: 'Frontend.Player.pictureInPicture',
+      exitPictureInPicture: 'Frontend.Player.exitPictureInPicture',
+      airplay: 'Frontend.Player.airplay',
+      live: 'Frontend.Player.live',
+      goLive: 'Frontend.Player.goLive',
+      settings: 'Frontend.Player.settings',
+      quality: 'Frontend.Player.quality',
+      minimizeLatency: 'Frontend.Player.minimizeLatency',
+      minimizeLatencyDescription: 'Frontend.Player.minimizeLatencyDescription',
+      on: 'Frontend.Player.on',
+      off: 'Frontend.Player.off',
+      playbackError: 'Frontend.Player.playbackError',
+      player: 'Frontend.Player.player',
+      auto: 'Frontend.Player.auto',
+      autoWithLabel: 'Frontend.Player.autoWithLabel',
+      volume: 'Frontend.Player.volume',
+      volumeValue: 'Frontend.Player.volumeValue',
+      volumeMuted: 'Frontend.Player.volumeMuted',
+      volumeMutedValue: 'Frontend.Player.volumeMutedValue',
+    },
 
     // Navigation and accessibility
     OfflineRecommendation: {

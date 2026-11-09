@@ -86,7 +86,7 @@ export const clientConfigStateAtom = atom(makeEmptyClientConfig());
 
 // Whether the client config has been populated, via hydration or the API.
 // Consumers that must not act on default config values (like the player,
-// whose video.js options are init-only) gate on this.
+// whose player options are init-only) gate on this.
 export const isClientConfigLoadedAtom = atom<boolean>(false);
 
 // The `null as T` casts below matter: this project compiles without

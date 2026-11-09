@@ -9,7 +9,7 @@ describe(`Live tests`, () => {
 	});
 
 	it('Should have a play button', () => {
-		cy.get('.vjs-big-play-button').should('be.visible');
+		cy.get('.owncast-big-play-button').should('be.visible');
 	});
 
 	it('User menu should be visible', () => {

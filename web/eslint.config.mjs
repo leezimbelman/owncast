@@ -14,6 +14,20 @@ export default defineConfig([
     linterOptions: {
       reportUnusedDisableDirectives: 'off',
     },
+    settings: {
+      // @videojs/react and storybook expose these entry points only through
+      // their package "exports" maps, which the node import resolver cannot
+      // read, and the typescript resolver bundled with eslint-config-next
+      // fails to load. Treat them as known modules so import/* rules skip
+      // resolution; the packages themselves are declared in package.json
+      // dependencies.
+      'import/core-modules': [
+        '@videojs/react/icons',
+        '@videojs/react/media/hlsjs-video',
+        'storybook/theming',
+        'storybook/viewport',
+      ],
+    },
     rules: {
       'react/destructuring-assignment': 'off',
       'react/prop-types': 'off',

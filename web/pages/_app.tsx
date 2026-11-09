@@ -10,15 +10,6 @@ import '../styles/antd.css';
 // the cascade.
 import '../styles/ant-overrides.scss';
 
-// TODO: Move this videojs sass to the player component.
-// video.js core styles first so the local overrides below win the cascade.
-// This used to be a require() inside VideoJS.tsx to dodge webpack's
-// global-css-outside-_app rule, but Turbopack compiles that require to a
-// module reference it never emits, crashing every page that loads the
-// player from a small chunk graph (the /embed/video pages).
-import 'video.js/dist/video-js.css';
-import '../components/video/VideoJS/VideoJS.scss';
-
 import { AppProps } from 'next/app';
 import { ReactElement, ReactNode, useEffect } from 'react';
 import { NextPage } from 'next';

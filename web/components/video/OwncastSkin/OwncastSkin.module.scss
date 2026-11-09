@@ -1,0 +1,300 @@
+// web/components/video/OwncastSkin/OwncastSkin.module.scss
+
+// Elements that set the HTML hidden attribute (fullscreen, PiP, AirPlay)
+// must stay hidden even though .button sets display: flex.
+.button[hidden],
+.live[hidden] {
+  display: none !important;
+}
+
+.controls {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  padding: 0 6px;
+  background-color: var(--theme-color-background-main);
+  color: var(--theme-color-components-text-on-light);
+  transition: opacity 0.2s ease-in-out;
+
+  &:not([data-visible]) {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+.group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+
+  svg {
+    width: 22px;
+    height: 22px;
+    fill: currentcolor;
+  }
+
+  &:hover,
+  &:focus-visible {
+    color: var(--theme-color-action);
+    outline: none;
+  }
+}
+
+// Icon swapping is state driven through the data attributes each button sets.
+.playIcon,
+.pauseIcon,
+.volumeOff,
+.volumeLow,
+.volumeHigh,
+.pipEnter,
+.pipExit,
+.fsEnter,
+.fsExit {
+  display: none;
+}
+
+.button[data-paused] .playIcon,
+.button:not([data-paused]) .pauseIcon {
+  display: block;
+}
+
+.button[data-volume-level='off'] .volumeOff,
+.button[data-volume-level='low'] .volumeLow,
+.button[data-volume-level='medium'] .volumeHigh,
+.button[data-volume-level='high'] .volumeHigh {
+  display: block;
+}
+
+.button[data-pip] .pipExit,
+.button:not([data-pip]) .pipEnter,
+.button[data-fullscreen] .fsExit,
+.button:not([data-fullscreen]) .fsEnter {
+  display: block;
+}
+
+.volume {
+  display: flex;
+  align-items: center;
+}
+
+.slider {
+  position: relative;
+  width: 100px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: rgb(128 128 128 / 40%);
+}
+
+.fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--media-slider-fill, 0%);
+  border-radius: 2px;
+  background: var(--theme-color-action);
+}
+
+.thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--media-slider-fill, 0%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--theme-color-components-text-on-light);
+  transform: translate(-50%, -50%);
+}
+
+.live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+
+  &[data-live-edge] {
+    cursor: default;
+
+    .liveDot {
+      background: var(--theme-color-components-video-live-indicator);
+    }
+  }
+
+  &:not([data-live]) {
+    display: none;
+  }
+}
+
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #777;
+}
+
+.tooltip {
+  // Tooltip.Popup uses the popover attribute; reset the UA styles.
+  margin: 0;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  background: rgb(20 20 20 / 90%);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.shortcut {
+  margin-left: 6px;
+  font-family: inherit;
+  opacity: 0.7;
+
+  &::before {
+    content: '(';
+  }
+
+  &::after {
+    content: ')';
+  }
+}
+
+.bigPlayButton {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--theme-color-action);
+  cursor: pointer;
+  transform: translate(-50%, -50%);
+
+  svg {
+    width: clamp(2rem, 30vmin, 8rem);
+    height: auto;
+    fill: currentcolor;
+    filter: drop-shadow(2px 3px 4px rgb(0 0 0 / 37%));
+    transition:
+      transform 0.2s ease-in-out,
+      filter 0.2s ease-in-out;
+  }
+
+  &:hover svg {
+    transform: scale(1.15);
+    filter: drop-shadow(2px 5px 4px rgb(0 0 0 / 58%));
+  }
+}
+
+// Fills the whole frame so clicking anywhere unmutes. Sits below the
+// control bar so the controls stay usable.
+.bigUnmuteButton {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--theme-color-action);
+  cursor: pointer;
+
+  svg {
+    width: clamp(2rem, 30vmin, 9rem);
+    height: auto;
+    filter: drop-shadow(2px 6px 22px rgb(0 0 0 / 90%)) drop-shadow(0 2px 8px rgb(0 0 0 / 80%));
+    transition:
+      transform 0.2s ease-in-out,
+      filter 0.2s ease-in-out;
+  }
+
+  &:hover svg {
+    transform: scale(1.25);
+  }
+}
+
+.buffering {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 10;
+  display: none;
+  color: var(--theme-color-components-text-on-light);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+
+  &[data-visible] {
+    display: block;
+  }
+
+  svg {
+    width: 56px;
+    height: 56px;
+    fill: currentcolor;
+    animation: spin 1s linear infinite;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.error {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 70%);
+  color: #fff;
+  text-align: center;
+}

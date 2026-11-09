@@ -22,13 +22,13 @@ filterTests(['desktop'], () => {
 					win.localStorage.removeItem('owncast_volume');
 				},
 			});
-			cy.get('.vjs-big-play-button').click();
+			cy.get('.owncast-big-play-button').click();
 			cy.get('video', { timeout: 15000 }).should(
 				($v) => expect($v[0].paused).to.be.false,
 			);
-			cy.get('.vjs-mute-control').click();
+			cy.get('.owncast-mute-button').click();
 			cy.get('video').should(($v) => expect($v[0].muted).to.be.true);
-			cy.get('.vjs-big-unmute-button').should('not.be.visible');
+			cy.get('.owncast-big-unmute-button').should('not.exist');
 		});
 
 		it('Does not appear when a persisted mute is restored', () => {
@@ -37,12 +37,12 @@ filterTests(['desktop'], () => {
 					win.localStorage.setItem('owncast_volume', '0');
 				},
 			});
-			cy.get('.vjs-big-play-button').click();
+			cy.get('.owncast-big-play-button').click();
 			cy.get('video', { timeout: 15000 }).should(
 				($v) => expect($v[0].paused).to.be.false,
 			);
 			cy.get('video').should(($v) => expect($v[0].volume).to.equal(0));
-			cy.get('.vjs-big-unmute-button').should('not.be.visible');
+			cy.get('.owncast-big-unmute-button').should('not.exist');
 		});
 
 		it('Appears when autoplay had to fall back to muted, and unmutes on click', () => {
@@ -50,7 +50,7 @@ filterTests(['desktop'], () => {
 			cy.visit('http://localhost:8080', {
 				onBeforeLoad(win) {
 					win.localStorage.removeItem('owncast_volume');
-					// Mimic a browser that blocks audible autoplay so video.js
+					// Mimic a browser that blocks audible autoplay so the player
 					// takes its muted fallback path.
 					const original = win.HTMLMediaElement.prototype.play;
 					win.HTMLMediaElement.prototype.play = function play() {
@@ -66,9 +66,9 @@ filterTests(['desktop'], () => {
 			cy.get('video', { timeout: 15000 }).should(
 				($v) => expect($v[0].muted && !$v[0].paused).to.be.true,
 			);
-			cy.get('.vjs-big-unmute-button').should('be.visible').click();
+			cy.get('.owncast-big-unmute-button').should('be.visible').click();
 			cy.get('video').should(($v) => expect($v[0].muted).to.be.false);
-			cy.get('.vjs-big-unmute-button').should('not.be.visible');
+			cy.get('.owncast-big-unmute-button').should('not.exist');
 		});
 	});
 });
